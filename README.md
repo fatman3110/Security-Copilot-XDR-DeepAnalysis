@@ -165,6 +165,9 @@ foreach ($roleName in $roles) {
 
 本ソリューションでは、Security Copilot コネクタの [Submit a Security Copilot prompt](https://learn.microsoft.com/connectors/securitycopilot/) アクションで、依頼文（プロンプト）の中で役割を伝えてエージェントを呼び出す方式を採用しています。Security Copilot には、[Execute a Security Copilot Agent](https://learn.microsoft.com/copilot/security/connector-logicapp-agent-trigger) コネクタでエージェントを名前で直接指定して呼び出す新方式もあります。新方式は将来性のある選択肢ですが、利用条件や環境ごとの個別設定が必要になる可能性、配布テンプレートとしての扱いやすさ、コスト（SCU）面での効果など、不確実な要素が残ります。これらのリスクを見越し、本ソリューションでは安定して利用できる現行方式を採用しています。
 
+## 注意事項
+本ツールは公式 Microsoft 製品ではなく、インシデント初動対応のために Security Copilot を利用するサンプルです。
+
 ## ライセンス
 
  [MIT License](LICENSE)
