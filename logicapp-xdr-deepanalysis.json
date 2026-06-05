@@ -1,0 +1,834 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "logicAppName": {
+      "type": "string",
+      "defaultValue": "la-xdr-deepanalysis",
+      "metadata": {
+        "description": "Logic App の名前"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "デプロイ先リージョン（既定はリソースグループと同じ）"
+      }
+    },
+    "tenantId": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure AD テナント ID"
+      }
+    },
+    "sentinelSubscriptionId": {
+      "type": "string",
+      "metadata": {
+        "description": "Microsoft Sentinel が存在するサブスクリプション ID"
+      }
+    },
+    "sentinelResourceGroupName": {
+      "type": "string",
+      "metadata": {
+        "description": "Microsoft Sentinel の Log Analytics ワークスペースが存在するリソースグループ名"
+      }
+    },
+    "sentinelWorkspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Microsoft Sentinel の Log Analytics ワークスペース名"
+      }
+    },
+    "recurrenceIntervalMinutes": {
+      "type": "int",
+      "defaultValue": 30,
+      "metadata": {
+        "description": "深掘り分析の実行間隔（分）"
+      }
+    },
+    "maxIncidentsPerRun": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "description": "1回の実行で処理するインシデントの最大数（SCU消費制御）"
+      }
+    },
+    "minSeverity": {
+      "type": "string",
+      "defaultValue": "medium",
+      "allowedValues": ["informational", "low", "medium", "high"],
+      "metadata": {
+        "description": "深掘り分析を実行する最低重大度。これ未満の severity は SC 分析をスキップし SCU を節約（推奨: high または medium）"
+      }
+    },
+    "correlationWaitMinutes": {
+      "type": "int",
+      "defaultValue": 30,
+      "metadata": {
+        "description": "インシデント作成からこの分数が経過するまで分析を待機（相関完了前の不完全な分析・重複分析による SCU 二重消費を防止）"
+      }
+    },
+    "incidentLookbackHours": {
+      "type": "int",
+      "defaultValue": 2,
+      "metadata": {
+        "description": "インシデント検索の遡り時間（時間）"
+      }
+    },
+    "teamsChannelLink": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Teams チャネルの「チャネルへのリンクを取得」で取得した URL をそのまま貼り付け。チャネル ID とチーム ID を自動抽出する（空の場合 Teams 投稿をスキップ）"
+      }
+    },
+    "outputLanguage": {
+      "type": "string",
+      "defaultValue": "Japanese",
+      "allowedValues": ["English", "Japanese"],
+      "metadata": {
+        "description": "Security Copilot 分析結果の出力言語"
+      }
+    }
+  },
+  "variables": {
+    "securitycopilotConnectionName": "securitycopilot",
+    "azuresentinelConnectionName": "azuresentinel",
+    "azuremonitorlogsConnectionName": "azuremonitorlogs",
+    "teamsConnectionName": "teams"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[variables('securitycopilotConnectionName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Security Copilot",
+        "api": {
+          "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'securitycopilot')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[variables('azuresentinelConnectionName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Microsoft Sentinel",
+        "api": {
+          "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'azuresentinel')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[variables('azuremonitorlogsConnectionName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure Monitor Logs",
+        "api": {
+          "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'azuremonitorlogs')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[variables('teamsConnectionName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Microsoft Teams",
+        "api": {
+          "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'teams')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('logicAppName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "tags": {
+        "purpose": "SecurityCopilot-XDR-DeepAnalysis",
+        "trigger": "schedule"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/connections', variables('securitycopilotConnectionName'))]",
+        "[resourceId('Microsoft.Web/connections', variables('azuresentinelConnectionName'))]",
+        "[resourceId('Microsoft.Web/connections', variables('azuremonitorlogsConnectionName'))]",
+        "[resourceId('Microsoft.Web/connections', variables('teamsConnectionName'))]"
+      ],
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "$connections": {
+              "defaultValue": {},
+              "type": "Object"
+            },
+            "tenantId": {
+              "defaultValue": "[parameters('tenantId')]",
+              "type": "String"
+            },
+            "sentinelSubscriptionId": {
+              "defaultValue": "[parameters('sentinelSubscriptionId')]",
+              "type": "String"
+            },
+            "sentinelResourceGroupName": {
+              "defaultValue": "[parameters('sentinelResourceGroupName')]",
+              "type": "String"
+            },
+            "sentinelWorkspaceName": {
+              "defaultValue": "[parameters('sentinelWorkspaceName')]",
+              "type": "String"
+            },
+            "teamsChannelLink": {
+              "defaultValue": "[parameters('teamsChannelLink')]",
+              "type": "String"
+            },
+            "outputLanguage": {
+              "defaultValue": "[parameters('outputLanguage')]",
+              "type": "String"
+            },
+            "maxIncidentsPerRun": {
+              "defaultValue": "[parameters('maxIncidentsPerRun')]",
+              "type": "Int"
+            },
+            "minSeverity": {
+              "defaultValue": "[parameters('minSeverity')]",
+              "type": "String"
+            },
+            "correlationWaitMinutes": {
+              "defaultValue": "[parameters('correlationWaitMinutes')]",
+              "type": "Int"
+            },
+            "incidentLookbackHours": {
+              "defaultValue": "[parameters('incidentLookbackHours')]",
+              "type": "Int"
+            }
+          },
+          "triggers": {
+            "Recurrence": {
+              "type": "Recurrence",
+              "recurrence": {
+                "frequency": "Week",
+                "interval": 1,
+                "schedule": {
+                  "weekDays": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+                  "hours": [9, 11, 13, 15, 17]
+                },
+                "timeZone": "Tokyo Standard Time"
+              }
+            }
+          },
+          "actions": {
+            "Scope_Main": {
+              "type": "Scope",
+              "actions": {
+                "Graph_list_incidents": {
+                  "type": "Http",
+                  "inputs": {
+                    "method": "GET",
+                    "uri": "@{concat('https://graph.microsoft.com/v1.0/security/incidents?$filter=status%20eq%20%27active%27%20and%20createdDateTime%20ge%20', formatDateTime(addhours(utcNow(), mul(-1, parameters('incidentLookbackHours'))), 'yyyy-MM-ddTHH:mm:ssZ'), '&$orderby=createdDateTime%20desc&$top=50')}",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "audience": "https://graph.microsoft.com"
+                    }
+                  },
+                  "runAfter": {}
+                },
+                "Filter_unprocessed": {
+                  "type": "Query",
+                  "inputs": {
+                    "from": "@body('Graph_list_incidents')?['value']",
+                    "where": "@and(not(contains(coalesce(string(item()?['customTags']), ''), 'DeepAnalysisComplete')), greaterOrEquals(if(equals(item()?['severity'],'high'),3,if(equals(item()?['severity'],'medium'),2,if(equals(item()?['severity'],'low'),1,0))), if(equals(parameters('minSeverity'),'high'),3,if(equals(parameters('minSeverity'),'medium'),2,if(equals(parameters('minSeverity'),'low'),1,0)))), not(contains(coalesce(string(item()?['systemTags']), ''), 'Automatic attack disruption')), greaterOrEquals(div(sub(ticks(utcNow()), ticks(item()?['createdDateTime'])), 600000000), parameters('correlationWaitMinutes')))"
+                  },
+                  "runAfter": {
+                    "Graph_list_incidents": ["Succeeded"]
+                  }
+                },
+                "Condition_has_incidents": {
+                  "type": "If",
+                  "expression": {
+                    "and": [
+                      {
+                        "greater": [
+                          "@length(body('Filter_unprocessed'))",
+                          0
+                        ]
+                      }
+                    ]
+                  },
+                  "runAfter": {
+                    "Filter_unprocessed": ["Succeeded"]
+                  },
+                  "actions": {
+                    "ForEach_incident": {
+                      "type": "Foreach",
+                      "foreach": "@take(body('Filter_unprocessed'), parameters('maxIncidentsPerRun'))",
+                      "actions": {
+                        "Graph_get_alerts": {
+                          "type": "Http",
+                          "inputs": {
+                            "method": "GET",
+                            "uri": "[concat('https://graph.microsoft.com/v1.0/security/incidents/', '@{items(''ForEach_incident'')?[''id'']}', '/alerts')]",
+                            "authentication": {
+                              "type": "ManagedServiceIdentity",
+                              "audience": "https://graph.microsoft.com"
+                            }
+                          },
+                          "runAfter": {}
+                        },
+                        "Compose_alert_titles": {
+                          "type": "Select",
+                          "inputs": {
+                            "from": "@body('Graph_get_alerts')?['value']",
+                            "select": "@item()?['title']"
+                          },
+                          "runAfter": {
+                            "Graph_get_alerts": ["Succeeded"]
+                          }
+                        },
+                        "Compose_alerts_summary": {
+                          "type": "Select",
+                          "inputs": {
+                            "from": "@body('Graph_get_alerts')?['value']",
+                            "select": {
+                              "alertId": "@item()?['id']",
+                              "title": "@item()?['title']",
+                              "severity": "@item()?['severity']",
+                              "createdDateTime": "@item()?['createdDateTime']",
+                              "serviceSource": "@item()?['serviceSource']",
+                              "mitreTechniques": "@item()?['mitreTechniques']",
+                              "evidence": "@item()?['evidence']"
+                            }
+                          },
+                          "runAfter": {
+                            "Graph_get_alerts": ["Succeeded"]
+                          }
+                        },
+                        "Compose_alerts_light": {
+                          "type": "Select",
+                          "inputs": {
+                            "from": "@body('Graph_get_alerts')?['value']",
+                            "select": {
+                              "title": "@item()?['title']",
+                              "severity": "@item()?['severity']",
+                              "time": "@item()?['createdDateTime']",
+                              "source": "@item()?['serviceSource']",
+                              "mitre": "@item()?['mitreTechniques']"
+                            }
+                          },
+                          "runAfter": {
+                            "Graph_get_alerts": ["Succeeded"]
+                          }
+                        },
+                        "KQL_incident_entities": {
+                          "type": "ApiConnection",
+                          "inputs": {
+                            "host": {
+                              "connection": {
+                                "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']"
+                              }
+                            },
+                            "method": "post",
+                            "path": "/queryData",
+                            "body": {
+                              "query": "let alertTitles = dynamic(@{string(body('Compose_alert_titles'))}); SecurityAlert | where TimeGenerated > ago(7d) | where AlertName in (alertTitles) | mv-expand Entity = todynamic(Entities) | extend EntityType = tostring(Entity.Type), EntityName = coalesce(tostring(Entity.Name), tostring(Entity.HostName), tostring(Entity.Address), tostring(Entity.DnsDomain)) | where isnotempty(EntityName) | summarize Alerts = make_set(AlertName, 10), Tactics = make_set(Tactics, 10), Techniques = make_set(Techniques, 10) by EntityType, EntityName | take 30"
+                            },
+                            "queries": {
+                              "subscriptions": "@parameters('sentinelSubscriptionId')",
+                              "resourcegroups": "@parameters('sentinelResourceGroupName')",
+                              "resourcetype": "Log Analytics Workspace",
+                              "resourcename": "@parameters('sentinelWorkspaceName')",
+                              "timerange": "Set in query"
+                            }
+                          },
+                          "runAfter": {
+                            "Compose_alert_titles": ["Succeeded"]
+                          }
+                        },
+                        "KQL_signin_anomalies": {
+                          "type": "ApiConnection",
+                          "inputs": {
+                            "host": {
+                              "connection": {
+                                "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']"
+                              }
+                            },
+                            "method": "post",
+                            "path": "/queryData",
+                            "body": {
+                              "query": "let alertTitles = dynamic(@{string(body('Compose_alert_titles'))}); SecurityAlert | where TimeGenerated > ago(7d) | where AlertName in (alertTitles) | mv-expand Entity = todynamic(Entities) | where Entity.Type == 'account' | extend UserPrincipalName = strcat(tostring(Entity.Name), '@', tostring(Entity.UPNSuffix)) | where UserPrincipalName != '@' and isnotempty(UserPrincipalName) | distinct UserPrincipalName | join kind=inner ( SigninLogs | where TimeGenerated > ago(7d) | summarize TotalAttempts = count(), FailureCount = countif(ResultType != '0'), SuccessCount = countif(ResultType == '0'), DistinctIPs = dcount(IPAddress), DistinctLocations = dcount(Location), IPs = make_set(IPAddress, 10), Locations = make_set(Location, 10) by UserPrincipalName ) on UserPrincipalName | project UserPrincipalName, TotalAttempts, FailureCount, SuccessCount, DistinctIPs, DistinctLocations, IPs, Locations | take 20"
+                            },
+                            "queries": {
+                              "subscriptions": "@parameters('sentinelSubscriptionId')",
+                              "resourcegroups": "@parameters('sentinelResourceGroupName')",
+                              "resourcetype": "Log Analytics Workspace",
+                              "resourcename": "@parameters('sentinelWorkspaceName')",
+                              "timerange": "Set in query"
+                            }
+                          },
+                          "runAfter": {
+                            "Compose_alert_titles": ["Succeeded"]
+                          }
+                        },
+                        "KQL_ti_matches": {
+                          "type": "ApiConnection",
+                          "inputs": {
+                            "host": {
+                              "connection": {
+                                "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']"
+                              }
+                            },
+                            "method": "post",
+                            "path": "/queryData",
+                            "body": {
+                              "query": "let alertTitles = dynamic(@{string(body('Compose_alert_titles'))}); SecurityAlert | where TimeGenerated > ago(7d) | where AlertName in (alertTitles) | mv-expand Entity = todynamic(Entities) | where Entity.Type == 'ip' | extend NetworkIP = tostring(Entity.Address) | where isnotempty(NetworkIP) | distinct NetworkIP | join kind=inner ( ThreatIntelIndicators | where TimeGenerated > ago(30d) | where ObservableKey in ('ipv4-addr:value', 'network-traffic:src_ref.value') | where IsActive == true | extend NetworkIP = ObservableValue | distinct NetworkIP, ThreatType = tostring(Data.indicator_types[0]), Confidence ) on NetworkIP | project NetworkIP, ThreatType, Confidence | distinct NetworkIP, ThreatType, Confidence | take 20"
+                            },
+                            "queries": {
+                              "subscriptions": "@parameters('sentinelSubscriptionId')",
+                              "resourcegroups": "@parameters('sentinelResourceGroupName')",
+                              "resourcetype": "Log Analytics Workspace",
+                              "resourcename": "@parameters('sentinelWorkspaceName')",
+                              "timerange": "Set in query"
+                            }
+                          },
+                          "runAfter": {
+                            "Compose_alert_titles": ["Succeeded"]
+                          }
+                        },
+                        "Compose_all_data": {
+                          "type": "Compose",
+                          "inputs": {
+                            "entities": "@body('KQL_incident_entities')?['value']",
+                            "signinAnomalies": "@body('KQL_signin_anomalies')?['value']",
+                            "threatIntel": "@body('KQL_ti_matches')?['value']"
+                          },
+                          "runAfter": {
+                            "KQL_incident_entities": ["Succeeded", "Failed"],
+                            "KQL_signin_anomalies": ["Succeeded", "Failed"],
+                            "KQL_ti_matches": ["Succeeded", "Failed"],
+                            "Compose_alerts_summary": ["Succeeded"],
+                            "Compose_alerts_light": ["Succeeded"]
+                          }
+                        },
+                        "Compose_analysis_prompt": {
+                          "type": "Compose",
+                          "inputs": "# Role\nYou are XDR Deep Dive Agent. Analyze the incident and produce a structured Japanese report.\n\n# Incident\nTitle: @{items('ForEach_incident')?['displayName']}\nSeverity: @{items('ForEach_incident')?['severity']} | Status: @{items('ForEach_incident')?['status']} | Created(UTC): @{items('ForEach_incident')?['createdDateTime']}\nSystemTags: @{string(coalesce(items('ForEach_incident')?['systemTags'], json('[]')))}\n\n# Alerts (@{length(body('Graph_get_alerts')?['value'])})\n@{string(body('Compose_alerts_light'))}\n\n# Entities (from Sentinel)\n@{string(outputs('Compose_all_data')?['entities'])}\n\n# Signin Activity\n@{string(outputs('Compose_all_data')?['signinAnomalies'])}\n\n# Threat Intelligence\n@{string(outputs('Compose_all_data')?['threatIntel'])}\n\n# Instructions\n - Reconstruct attack timeline in JST (UTC+9) chronological order\n - Map each phase to MITRE ATT&CK techniques\n - If SystemTags contains 'Automatic attack disruption', describe auto-remediation actions\n - Assess overall risk and provide recommended next actions\n - Respond in @{parameters('outputLanguage')}",
+                          "runAfter": {
+                            "Compose_all_data": ["Succeeded"]
+                          }
+                        },
+                        "SecurityCopilot_analyze": {
+                          "type": "ApiConnection",
+                          "inputs": {
+                            "host": {
+                              "connection": {
+                                "name": "@parameters('$connections')['securitycopilot']['connectionId']"
+                              }
+                            },
+                            "method": "post",
+                            "path": "/process-prompt",
+                            "body": {
+                              "PromptContent": "@outputs('Compose_analysis_prompt')"
+                            }
+                          },
+                          "runAfter": {
+                            "Compose_analysis_prompt": ["Succeeded"]
+                          }
+                        },
+                        "Compose_result": {
+                          "type": "Compose",
+                          "inputs": "XDR Deep Analysis\nIncident: @{items('ForEach_incident')?['displayName']}\nSeverity: @{items('ForEach_incident')?['severity']}\nAnalyzed: @{utcNow()}\n---\n@{body('SecurityCopilot_analyze')?['EvaluationResultContent']}\n---\nURL: @{items('ForEach_incident')?['incidentWebUrl']}",
+                          "runAfter": {
+                            "SecurityCopilot_analyze": ["Succeeded"]
+                          }
+                        },
+                        "Graph_add_tag": {
+                          "type": "Http",
+                          "inputs": {
+                            "method": "PATCH",
+                            "uri": "https://graph.microsoft.com/v1.0/security/incidents/@{items('ForEach_incident')?['id']}",
+                            "headers": {
+                              "Content-Type": "application/json"
+                            },
+                            "body": {
+                              "customTags": "@union(if(equals(items('ForEach_incident')?['customTags'], null), createArray(), items('ForEach_incident')?['customTags']), createArray('DeepAnalysisComplete'))"
+                            },
+                            "authentication": {
+                              "type": "ManagedServiceIdentity",
+                              "audience": "https://graph.microsoft.com"
+                            }
+                          },
+                          "runAfter": {
+                            "Compose_result": ["Succeeded"]
+                          }
+                        },
+                        "Compose_full_comment": {
+                          "type": "Compose",
+                          "inputs": "@replace(replace(string(outputs('Compose_result')), '\"', ''''), '\\', '/')",
+                          "runAfter": {
+                            "Graph_add_tag": ["Succeeded"]
+                          }
+                        },
+                        "Compose_comment_chunks": {
+                          "type": "Select",
+                          "inputs": {
+                            "from": "@range(0, if(equals(length(outputs('Compose_full_comment')), 0), 0, add(div(length(outputs('Compose_full_comment')), 990), if(greater(mod(length(outputs('Compose_full_comment')), 990), 0), 1, 0))))",
+                            "select": "@substring(outputs('Compose_full_comment'), mul(item(), 990), min(990, sub(length(outputs('Compose_full_comment')), mul(item(), 990))))"
+                          },
+                          "runAfter": {
+                            "Compose_full_comment": ["Succeeded"]
+                          }
+                        },
+                        "ForEach_post_comment": {
+                          "type": "Foreach",
+                          "foreach": "@body('Compose_comment_chunks')",
+                          "actions": {
+                            "Graph_post_comment_chunk": {
+                              "type": "Http",
+                              "inputs": {
+                                "method": "POST",
+                                "uri": "https://graph.microsoft.com/v1.0/security/incidents/@{items('ForEach_incident')?['id']}/comments",
+                                "headers": {
+                                  "Content-Type": "application/json"
+                                },
+                                "body": {
+                                  "@@odata.type": "microsoft.graph.security.alertComment",
+                                  "comment": "@{items('ForEach_post_comment')}"
+                                },
+                                "authentication": {
+                                  "type": "ManagedServiceIdentity",
+                                  "audience": "https://graph.microsoft.com"
+                                }
+                              },
+                              "runAfter": {}
+                            }
+                          },
+                          "runAfter": {
+                            "Compose_comment_chunks": ["Succeeded"]
+                          },
+                          "operationOptions": "Sequential"
+                        },
+                        "Condition_teams_post": {
+                          "type": "If",
+                          "expression": {
+                            "and": [
+                              {
+                                "not": {
+                                  "equals": [
+                                    "@parameters('teamsChannelLink')",
+                                    ""
+                                  ]
+                                }
+                              }
+                            ]
+                          },
+                          "runAfter": {
+                            "ForEach_post_comment": ["Succeeded"]
+                          },
+                          "actions": {
+                            "Compose_adaptive_card": {
+                              "type": "Compose",
+                              "inputs": {
+                                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                                "type": "AdaptiveCard",
+                                "version": "1.4",
+                                "body": [
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "XDR Incident: @{items('ForEach_incident')?['displayName']}",
+                                    "weight": "Bolder",
+                                    "size": "Medium",
+                                    "wrap": true
+                                  },
+                                  {
+                                    "type": "FactSet",
+                                    "facts": [
+                                      { "title": "Severity", "value": "@{items('ForEach_incident')?['severity']}" },
+                                      { "title": "Status", "value": "@{items('ForEach_incident')?['status']}" },
+                                      { "title": "Created", "value": "@{items('ForEach_incident')?['createdDateTime']}" },
+                                      { "title": "Alerts", "value": "@{length(body('Graph_get_alerts')?['value'])}" },
+                                      { "title": "Auto Disruption", "value": "@{if(contains(string(coalesce(items('ForEach_incident')?['systemTags'], json('[]'))), 'Automatic attack disruption'), 'Yes', 'No')}" }
+                                    ]
+                                  },
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "\u5206\u6790\u7d50\u679c",
+                                    "weight": "Bolder",
+                                    "spacing": "Medium"
+                                  },
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "@{body('SecurityCopilot_analyze')?['EvaluationResultContent']}",
+                                    "wrap": true
+                                  },
+                                  {
+                                    "type": "Input.Text",
+                                    "id": "analystComment",
+                                    "label": "\u30a2\u30ca\u30ea\u30b9\u30c8\u30b3\u30e1\u30f3\u30c8",
+                                    "placeholder": "\u30b3\u30e1\u30f3\u30c8\uff08\u4efb\u610f\uff09",
+                                    "isMultiline": true,
+                                    "isRequired": false
+                                  },
+                                  {
+                                    "type": "ActionSet",
+                                    "actions": [
+                                      { "type": "Action.Submit", "title": "True Positive \u3068\u3057\u3066\u78ba\u8a8d", "style": "destructive", "data": { "action": "ConfirmTP" } },
+                                      { "type": "Action.Submit", "title": "False Positive \u3068\u3057\u3066\u30af\u30ed\u30fc\u30ba", "data": { "action": "CloseFP" } },
+                                      { "type": "Action.OpenUrl", "title": "Defender Portal \u3067\u958b\u304f", "url": "@{items('ForEach_incident')?['incidentWebUrl']}" }
+                                    ]
+                                  }
+                                ]
+                              },
+                              "runAfter": {}
+                            },
+                            "Post_adaptive_card_and_wait": {
+                              "type": "ApiConnectionWebhook",
+                              "inputs": {
+                                "host": {
+                                  "connection": {
+                                    "name": "@parameters('$connections')['teams']['connectionId']"
+                                  }
+                                },
+                                "path": "/v1.0/teams/conversation/gatherinput/poster/Flow bot/location/Channel/$subscriptions",
+                                "body": {
+                                  "body": {
+                                    "messageBody": "@{string(outputs('Compose_adaptive_card'))}",
+                                    "updateMessage": "[\u5206\u6790] @{items('ForEach_incident')?['displayName']} - \u5224\u5b9a\u5b8c\u4e86 - @{items('ForEach_incident')?['incidentWebUrl']}",
+                                    "recipient": {
+                                      "groupId": "@{first(split(last(split(parameters('teamsChannelLink'), 'groupId=')), '&'))}",
+                                      "channelId": "@{decodeUriComponent(first(split(last(split(parameters('teamsChannelLink'), '/channel/')), '/')))}"
+                                    }
+                                  },
+                                  "notificationUrl": "@{listCallbackUrl()}"
+                                }
+                              },
+                              "runAfter": {
+                                "Compose_adaptive_card": ["Succeeded"]
+                              }
+                            },
+                            "Switch_action": {
+                              "type": "Switch",
+                              "expression": "@body('Post_adaptive_card_and_wait')?['data']?['action']",
+                              "cases": {
+                                "Confirm_True_Positive": {
+                                  "case": "ConfirmTP",
+                                  "actions": {
+                                    "Graph_update_TP": {
+                                      "type": "Http",
+                                      "inputs": {
+                                        "method": "PATCH",
+                                        "uri": "https://graph.microsoft.com/v1.0/security/incidents/@{items('ForEach_incident')?['id']}",
+                                        "headers": {
+                                          "Content-Type": "application/json"
+                                        },
+                                        "body": {
+                                          "classification": "truePositive",
+                                          "determination": "multiStagedAttack",
+                                          "assignedTo": "@{body('Post_adaptive_card_and_wait')?['responder']?['userPrincipalName']}",
+                                          "customTags": ["DeepAnalysisComplete", "TruePositive-Confirmed"]
+                                        },
+                                        "authentication": {
+                                          "type": "ManagedServiceIdentity",
+                                          "audience": "https://graph.microsoft.com"
+                                        }
+                                      },
+                                      "runAfter": {}
+                                    },
+                                    "Graph_comment_TP": {
+                                      "type": "Http",
+                                      "inputs": {
+                                        "method": "POST",
+                                        "uri": "https://graph.microsoft.com/v1.0/security/incidents/@{items('ForEach_incident')?['id']}/comments",
+                                        "headers": {
+                                          "Content-Type": "application/json"
+                                        },
+                                        "body": {
+                                          "@@odata.type": "microsoft.graph.security.alertComment",
+                                          "comment": "@{concat('Classified as True Positive by ', body('Post_adaptive_card_and_wait')?['responder']?['userPrincipalName'], '. Comment: ', body('Post_adaptive_card_and_wait')?['data']?['analystComment'])}"
+                                        },
+                                        "authentication": {
+                                          "type": "ManagedServiceIdentity",
+                                          "audience": "https://graph.microsoft.com"
+                                        }
+                                      },
+                                      "runAfter": {
+                                        "Graph_update_TP": ["Succeeded"]
+                                      }
+                                    }
+                                  }
+                                },
+                                "Close_False_Positive": {
+                                  "case": "CloseFP",
+                                  "actions": {
+                                    "Graph_update_FP": {
+                                      "type": "Http",
+                                      "inputs": {
+                                        "method": "PATCH",
+                                        "uri": "https://graph.microsoft.com/v1.0/security/incidents/@{items('ForEach_incident')?['id']}",
+                                        "headers": {
+                                          "Content-Type": "application/json"
+                                        },
+                                        "body": {
+                                          "status": "resolved",
+                                          "classification": "falsePositive",
+                                          "determination": "other",
+                                          "assignedTo": "@{body('Post_adaptive_card_and_wait')?['responder']?['userPrincipalName']}",
+                                          "customTags": ["DeepAnalysisComplete", "FalsePositive-Closed"],
+                                          "resolvingComment": "@{coalesce(body('Post_adaptive_card_and_wait')?['data']?['analystComment'], 'Closed via automated deep analysis')}"
+                                        },
+                                        "authentication": {
+                                          "type": "ManagedServiceIdentity",
+                                          "audience": "https://graph.microsoft.com"
+                                        }
+                                      },
+                                      "runAfter": {}
+                                    },
+                                    "Graph_comment_FP": {
+                                      "type": "Http",
+                                      "inputs": {
+                                        "method": "POST",
+                                        "uri": "https://graph.microsoft.com/v1.0/security/incidents/@{items('ForEach_incident')?['id']}/comments",
+                                        "headers": {
+                                          "Content-Type": "application/json"
+                                        },
+                                        "body": {
+                                          "@@odata.type": "microsoft.graph.security.alertComment",
+                                          "comment": "@{concat('Closed as False Positive by ', body('Post_adaptive_card_and_wait')?['responder']?['userPrincipalName'], '. Comment: ', body('Post_adaptive_card_and_wait')?['data']?['analystComment'])}"
+                                        },
+                                        "authentication": {
+                                          "type": "ManagedServiceIdentity",
+                                          "audience": "https://graph.microsoft.com"
+                                        }
+                                      },
+                                      "runAfter": {
+                                        "Graph_update_FP": ["Succeeded"]
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "default": {
+                                "actions": {}
+                              },
+                              "runAfter": {
+                                "Post_adaptive_card_and_wait": ["Succeeded"]
+                              }
+                            }
+                          },
+                          "else": {
+                            "actions": {}
+                          }
+                        }
+                      },
+                      "runAfter": {},
+                      "operationOptions": "Sequential"
+                    }
+                  },
+                  "else": {
+                    "actions": {}
+                  }
+                }
+              }
+            },
+            "Scope_ErrorHandling": {
+              "type": "Scope",
+              "actions": {
+                "Condition_teams_error": {
+                  "type": "If",
+                  "expression": {
+                    "and": [
+                      {
+                        "not": {
+                          "equals": [
+                            "@parameters('teamsChannelLink')",
+                            ""
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  "runAfter": {},
+                  "actions": {
+                    "Teams_error_notify": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['teams']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/beta/teams/@{encodeURIComponent(first(split(last(split(parameters('teamsChannelLink'), 'groupId=')), '&')))}/channels/@{encodeURIComponent(decodeUriComponent(first(split(last(split(parameters('teamsChannelLink'), '/channel/')), '/'))))}/messages",
+                        "body": {
+                          "body": {
+                            "content": "XDR Logic App Error - Run: @{workflow().run.name} at @{utcNow()}. Check run history.",
+                            "contentType": "text"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "else": {
+                    "actions": {}
+                  }
+                }
+              },
+              "runAfter": {
+                "Scope_Main": ["Failed", "TimedOut"]
+              }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "$connections": {
+            "value": {
+              "securitycopilot": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', variables('securitycopilotConnectionName'))]",
+                "connectionName": "[variables('securitycopilotConnectionName')]",
+                "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'securitycopilot')]"
+              },
+              "azuresentinel": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', variables('azuresentinelConnectionName'))]",
+                "connectionName": "[variables('azuresentinelConnectionName')]",
+                "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'azuresentinel')]"
+              },
+              "azuremonitorlogs": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', variables('azuremonitorlogsConnectionName'))]",
+                "connectionName": "[variables('azuremonitorlogsConnectionName')]",
+                "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'azuremonitorlogs')]"
+              },
+              "teams": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', variables('teamsConnectionName'))]",
+                "connectionName": "[variables('teamsConnectionName')]",
+                "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'teams')]"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "logicAppResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Logic/workflows', parameters('logicAppName'))]"
+    },
+    "managedIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('logicAppName')), '2019-05-01', 'Full').identity.principalId]"
+    }
+  }
+}
